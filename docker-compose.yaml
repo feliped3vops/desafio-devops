@@ -33,7 +33,6 @@ services:
     nginx:
         build:
             context: ./nginx
-        image: javielrezende/nginx
         container_name: nginx
         depends_on:
             - app
