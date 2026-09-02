@@ -21,14 +21,14 @@ spec:
             - containerPort: 80
           readinessProbe:
             httpGet:
-              path: /
+              path: /nginx-health
               port: 80
             initialDelaySeconds: 5
             periodSeconds: 5
 
           livenessProbe:
             httpGet:
-              path: /
+              path: /nginx-health
               port: 80
             initialDelaySeconds: 15
             periodSeconds: 10
