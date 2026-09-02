@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: felipetech1/desafio-devops-app:0197756fd9ec727632e54071cd838e79600da390
+          image: felipetech1/desafio-devops-app:9f9b50bbbf6b8e40b0a45a3e160688f4a0c27755
           command:
             - node
             - index.js
