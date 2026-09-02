@@ -46,11 +46,14 @@ spec:
             - name: HOST
               value: mysql
             - name: USER
-              value: root
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_USER
             - name: PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: mysql-secret
-                  key: MYSQL_ROOT_PASSWORD
+                  key: MYSQL_PASSWORD
             - name: DATABASE
               value: node_db
