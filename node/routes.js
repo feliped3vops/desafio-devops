@@ -10,9 +10,9 @@ routes.get('/health', (_, res) => {
 });
 
 routes.get('/', (_, res) => {
-    const sql = `INSERT INTO peoples(name) VALUES('${faker.name.findName()}')`;
+    const name = faker.name.findName();
 
-    connection.query(sql, (err) => {
+    connection.query('INSERT INTO peoples(name) VALUES (?)', [name], (err) => {
         if (err) {
             console.error('Erro ao inserir registro:', err);
             return res.status(500).send('Erro ao inserir registro');
