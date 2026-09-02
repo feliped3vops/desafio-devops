@@ -2,8 +2,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: app
+  namespace: desafio-devops
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: app
@@ -15,6 +16,9 @@ spec:
       containers:
         - name: app
           image: felipetech1/desafio-devops-app:latest
+          command:
+            - node
+            - index.js
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000

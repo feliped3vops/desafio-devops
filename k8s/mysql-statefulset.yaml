@@ -2,22 +2,40 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: mysql
+  namespace: desafio-devops
 spec:
   serviceName: mysql
   replicas: 1
+
   selector:
     matchLabels:
       app: mysql
+
   template:
     metadata:
       labels:
         app: mysql
+
     spec:
       containers:
         - name: mysql
-          image: mysql:5.7
+          image: mysql:8.0
+
+          args:
+            - --innodb-use-native-aio=0
+            - --performance-schema=OFF
+
           ports:
             - containerPort: 3306
+
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+
           livenessProbe:
             exec:
               command:
@@ -37,24 +55,36 @@ spec:
                 - localhost
             initialDelaySeconds: 10
             periodSeconds: 5
-            
+
           env:
             - name: MYSQL_DATABASE
               value: node_db
+
             - name: MYSQL_ROOT_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: mysql-secret
                   key: MYSQL_ROOT_PASSWORD
+
           volumeMounts:
             - name: mysql-data
               mountPath: /var/lib/mysql
+
+            - name: mysql-init
+              mountPath: /docker-entrypoint-initdb.d
+
+      volumes:
+        - name: mysql-init
+          configMap:
+            name: mysql-init
+
   volumeClaimTemplates:
     - metadata:
         name: mysql-data
       spec:
         accessModes:
           - ReadWriteOnce
+
         resources:
           requests:
             storage: 1Gi
