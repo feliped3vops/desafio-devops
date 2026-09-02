@@ -1,5 +1,6 @@
 services:
     app:
+        image: felipetech1/desafio-devops-app:latest
         build:
             context: ./node
         container_name: app
