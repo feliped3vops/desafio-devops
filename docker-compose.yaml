@@ -6,7 +6,10 @@ services:
         container_name: app
         entrypoint: dockerize -wait tcp://db:3306 -timeout 60s node index.js
         environment:
-            - DATABASE=node_db
+            - HOST=db
+            - USER=${MYSQL_USER}
+            - PASSWORD=${MYSQL_PASSWORD}
+            - DATABASE=${MYSQL_DATABASE:-node_db}
         networks:
             - node-network
         volumes:
@@ -25,9 +28,11 @@ services:
         container_name: db
         restart: always
         tty: true
-        environment: 
-            - MYSQL_DATABASE=node_db
-            - MYSQL_ROOT_PASSWORD=root
+        environment:
+            - MYSQL_DATABASE=${MYSQL_DATABASE:-node_db}
+            - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+            - MYSQL_USER=${MYSQL_USER}
+            - MYSQL_PASSWORD=${MYSQL_PASSWORD}
         networks:
             - node-network
 
