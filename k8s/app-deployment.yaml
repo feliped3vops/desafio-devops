@@ -15,11 +15,11 @@ spec:
     spec:
       containers:
         - name: app
-          image: felipetech1/desafio-devops-app:latest
+          image: felipetech1/desafio-devops-app:58af0fcdac4868b2e43e75f5f2260d120cee89
           command:
             - node
             - index.js
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - containerPort: 3000
           readinessProbe:
