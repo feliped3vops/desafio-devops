@@ -21,10 +21,10 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Faz o build da imagem da aplicacao
-        run: docker build -t felipetech1/desafio-devops-app:latest ./node
+        run: docker build -t felipetech1/desafio-devops-app:${{ github.sha }} ./node
 
       - name: Start dos servicos
-        run: docker compose up -d
+        run: APP_IMAGE_TAG=${{ github.sha }} docker compose up -d
 
       - name: Testa a aplicacao
         run: |
@@ -32,4 +32,4 @@ jobs:
           curl --fail http://localhost:8080
   
       - name: Publica imagem no Docker Hub
-        run: docker push felipetech1/desafio-devops-app:latest
+        run: docker push felipetech1/desafio-devops-app:${{ github.sha }}

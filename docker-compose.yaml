@@ -1,6 +1,6 @@
 services:
     app:
-        image: felipetech1/desafio-devops-app:latest
+        image: felipetech1/desafio-devops-app:${APP_IMAGE_TAG:-latest}
         build:
             context: ./node
         container_name: app
