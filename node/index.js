@@ -2,7 +2,6 @@ const express = require('express')
 const routes = require('./routes')
 
 const app = express()
-const port = 3000
 
 app.use((req, res, next) => {
     const start = Date.now();
@@ -20,6 +19,4 @@ app.use((req, res, next) => {
 
 app.use(routes);
 
-app.listen(port, () => {
-    console.log('Rodando na porta ' + port)
-})
+module.exports = app

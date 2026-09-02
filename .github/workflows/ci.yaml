@@ -17,6 +17,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Instala dependencias da aplicacao
+        working-directory: ./node
+        run: npm install
+
+      - name: Roda os testes automatizados
+        working-directory: ./node
+        run: npm test
+
       - name: Login no Docker Hub
         uses: docker/login-action@v3
         with:

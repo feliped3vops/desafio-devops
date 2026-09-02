@@ -18,7 +18,7 @@ spec:
           image: felipetech1/desafio-devops-app:d6aa98e0e6a9b83cab9741e06d5141303ea411b9
           command:
             - node
-            - index.js
+            - server.js
           imagePullPolicy: Always
           ports:
             - containerPort: 3000

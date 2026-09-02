@@ -4,7 +4,7 @@ services:
         build:
             context: ./node
         container_name: app
-        entrypoint: dockerize -wait tcp://db:3306 -timeout 60s node index.js
+        entrypoint: dockerize -wait tcp://db:3306 -timeout 60s node server.js
         environment:
             - HOST=db
             - USER=${MYSQL_USER}
