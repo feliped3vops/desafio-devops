@@ -20,6 +20,17 @@ describe('GET /health', () => {
     });
 });
 
+describe('GET /metrics', () => {
+    test('expoe metricas no formato do prometheus', async () => {
+        const response = await request(app).get('/metrics');
+
+        expect(response.statusCode).toBe(200);
+        expect(response.headers['content-type']).toContain('text/plain');
+        expect(response.text).toContain('http_request_duration_seconds');
+        expect(response.text).toContain('db_query_duration_seconds');
+    });
+});
+
 describe('GET /', () => {
     test('insere um registro e lista o conteudo em HTML', async () => {
         connection.query.mockImplementation((sql, paramsOrCallback, maybeCallback) => {
