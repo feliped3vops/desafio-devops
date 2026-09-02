@@ -45,6 +45,10 @@ O diagnóstico foi feito subindo o `docker-compose.yaml` original e observando o
 - `node/Dockerfile` usava `node:15` (fora de suporte) e copiava todo o código antes de instalar dependências, invalidando o cache do Docker a cada alteração de código — trocado para `node:22-bookworm-slim` e reordenado para `COPY package*.json` + `npm install` antes do `COPY . .`. Também foi limpo o cache do `apt` (`rm -rf /var/lib/apt/lists/*`) e ampliado o `.dockerignore` (`node_modules`, `.env`, `.git`, `npm-debug.log`) para reduzir o contexto de build e não vazar segredos locais para a imagem.
 - `nginx/Dockerfile` usava a tag flutuante `nginx` (depois `nginx:alpine`) — fixada em `nginx:1.31.4-alpine` para builds reprodutíveis.
 - `mysql/Dockerfile` copiava o diretório inteiro (`COPY . .`) para dentro de `docker-entrypoint-initdb.d`, o que rodaria qualquer arquivo do diretório como script de inicialização — corrigido para copiar apenas o `init.sql` necessário.
+- `node/Dockerfile` rodava a aplicação como `root` e a imagem final carregava a mesma toolchain usada pra instalar as dependências (incluindo `jest`/`supertest`, depois que os testes automatizados foram adicionados) — convertido para multi-stage: um stage `builder` roda `npm install --omit=dev` e baixa o `dockerize`, e o stage `runtime` só copia o `dockerize` e o app já buildado, rodando como um usuário dedicado (`nodejs`, uid `1001`) via `USER nodejs`.
+
+**Health check do Nginx**
+- O pod do `nginx` acumulava vários restarts. Causa: as probes de `readiness`/`liveness` apontavam para `/`, que faz `proxy_pass` pro `app` — qualquer erro do `app` (por exemplo, durante os testes de migração do segredo do MySQL) virava `500`/`502` na própria checagem de saúde do Nginx, e o kubelet matava e reiniciava o container mesmo ele estando saudável. Corrigido criando um endpoint `/nginx-health` isolado no `nginx.conf` (não passa pelo `proxy_pass`) e apontando as probes pra ele em `k8s/nginx-deployment.yaml`, desacoplando a saúde do Nginx da saúde do backend.
 
 **Aplicação (Node)**
 - As queries ao MySQL (`connection.query`) não tratavam erros nem callback de falha: uma query com erro travava a aplicação sem resposta ao cliente — adicionado tratamento de erro com log (`console.error`) e retorno de status `500` em caso de falha, tanto no `INSERT` quanto no `SELECT`.
@@ -83,12 +87,21 @@ O diagnóstico foi feito subindo o `docker-compose.yaml` original e observando o
 **Observabilidade**
 - Middleware em `node/index.js` loga `method`, rota, status code e duração de cada requisição — visibilidade básica sobre tráfego e latência da aplicação, disponível via `stdout`/`kubectl logs`.
 
+**Testes automatizados**
+- `node/index.js` foi separado em duas partes: `index.js` monta e **exporta** o `app` do Express (sem chamar `.listen()`), e `node/server.js` é quem sobe o servidor de fato — separação necessária para o Supertest conseguir testar o `app` via `require()` sem abrir uma porta real.
+- `node/__tests__/app.test.js` (Jest + Supertest) cobre `/health`, a rota `/` (inserção + listagem), o *prepared statement* do `INSERT` e os dois caminhos de erro (falha no `INSERT` e no `SELECT`), usando um mock de `connectionDb.js` — não depende de um MySQL real.
+- O `.github/workflows/ci.yaml` instala as dependências e roda `npm test` **antes** de buildar a imagem Docker, pra falhar rápido (sem gastar tempo de build) se algum teste quebrar.
+
+**Hardening do Dockerfile da aplicação**
+- `node/Dockerfile` virou multi-stage: o stage `builder` instala só dependências de produção (`npm install --omit=dev`) e baixa o `dockerize`; o stage `runtime` copia apenas o resultado disso, sem toolchain de build nem `devDependencies` (`jest`/`supertest` ficam de fora da imagem final).
+- A aplicação passou a rodar como usuário dedicado não-root (`nodejs`, uid/gid `1001`) em vez de `root`, seguindo o mesmo princípio de privilégio mínimo já aplicado ao usuário do MySQL.
+
 ### 3. O que faria com mais tempo
 
 - **Produção real para o Vault**: hoje ele roda em modo dev (memória, token root efêmero) só para demonstrar a arquitetura. Levaria para HA/raft com storage persistente e auto-unseal via KMS, além de rotação periódica automática das credenciais (hoje a rotação é manual, documentada em `infra/README.md`).
 - **Instalar Vault/ESO via GitOps também**: hoje é um bootstrap manual via Helm (fora do path sincronizado pelo ArgoCD). Criaria uma segunda `Application` do ArgoCD (com sync-wave anterior à da aplicação) apontando para os charts, para que a infraestrutura de segredos também seja declarativa.
-- **Testes automatizados**: o `package.json` não tem suite de testes real (`"test": "echo ... && exit 1"`). Adicionaria testes unitários/integração para as rotas e faria o CI falhar de verdade em regressões, além de testes automatizados dos manifests Kubernetes (ex.: `kubeconform`/`kube-linter`).
+- **Testes além da aplicação**: os testes hoje cobrem só as rotas do Node (com o banco mockado). Adicionaria testes de integração contra um MySQL real (ex.: via `testcontainers`) e testes automatizados dos manifests Kubernetes (ex.: `kubeconform`/`kube-linter`) no CI.
 - **Observabilidade além de log**: exportar métricas de aplicação (latência, taxa de erro, throughput) num formato Prometheus e adicionar tracing distribuído, hoje a visibilidade fica limitada a log estruturado em stdout.
-- **Nginx**: adicionar `readinessProbe`/`resources` já cobre o básico; faria também hardening do `nginx.conf` (headers de segurança, rate limiting) e um HPA para o `nginx-deployment`, hoje fixo em 1 réplica.
+- **Nginx**: adicionar `readinessProbe`/`resources` já cobre o básico; faria também hardening do `nginx.conf` (headers de segurança, rate limiting), multi-stage/usuário não-root no `nginx/Dockerfile` (feito só no `node/Dockerfile` por ora) e um HPA para o `nginx-deployment`, hoje fixo em 1 réplica.
 - **Ambientes**: parametrizar os manifests (Kustomize/Helm) para suportar múltiplos ambientes (dev/staging/prod) em vez de um único conjunto estático em `k8s/`.
 - **Driver do MySQL**: o pacote `mysql` (legado) não tem retry/reconexão automática após um erro fatal na conexão (uma falha de rede ou restart do banco derruba a aplicação até o próximo redeploy). Migraria para `mysql2` com um pool de conexões, que lida melhor com esse cenário.
