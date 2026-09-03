@@ -6,11 +6,8 @@ on:
       - "**"
   pull_request:
 
-permissions:
-  contents: write
-
 jobs:
-  build-and-test:
+  test:
     runs-on: ubuntu-latest
 
     steps:
@@ -29,6 +26,14 @@ jobs:
       - name: Roda os testes automatizados
         working-directory: ./node
         run: npm test
+
+  build-and-publish:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Login no Docker Hub
         uses: docker/login-action@v3
@@ -52,17 +57,26 @@ jobs:
         run: |
           sleep 10
           curl --fail http://localhost:8080
-  
+
       - name: Publica imagem no Docker Hub
         run: docker push felipetech1/desafio-devops-app:${{ github.sha }}
 
+  update-manifest:
+    needs: build-and-publish
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Atualiza a imagem no manifest de deploy
-        if: github.event_name == 'push'
         run: |
           sed -i "s|image: felipetech1/desafio-devops-app:.*|image: felipetech1/desafio-devops-app:${{ github.sha }}|" k8s/app-deployment.yaml
 
       - name: Commita e publica a atualizacao do manifest
-        if: github.event_name == 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
