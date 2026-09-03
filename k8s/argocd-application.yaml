@@ -8,7 +8,7 @@ spec:
 
   source:
     repoURL: https://github.com/feliped3vops/desafio-devops.git
-    targetRevision: fix/estabilizacao-docker
+    targetRevision: main
     path: k8s
 
   destination:
