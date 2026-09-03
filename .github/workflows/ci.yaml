@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Instala dependencias da aplicacao
+        working-directory: ./node
+        run: npm install
+
+      - name: Roda os testes automatizados
+        working-directory: ./node
+        run: npm test
+
+  build-and-publish:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login no Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Faz o build da imagem da aplicacao
+        run: docker build -t felipetech1/desafio-devops-app:${{ github.sha }} ./node
+
+      - name: Gera credenciais efemeras do banco para o teste
+        run: |
+          echo "MYSQL_ROOT_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          echo "MYSQL_USER=app_user" >> "$GITHUB_ENV"
+          echo "MYSQL_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+
+      - name: Start dos servicos
+        run: APP_IMAGE_TAG=${{ github.sha }} docker compose up -d
+
+      - name: Testa a aplicacao
+        run: |
+          sleep 10
+          curl --fail http://localhost:8080
+
+      - name: Publica imagem no Docker Hub
+        run: docker push felipetech1/desafio-devops-app:${{ github.sha }}
+
+  update-manifest:
+    needs: build-and-publish
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Atualiza a imagem no manifest de deploy
+        run: |
+          sed -i "s|image: felipetech1/desafio-devops-app:.*|image: felipetech1/desafio-devops-app:${{ github.sha }}|" k8s/app-deployment.yaml
+
+      - name: Commita e publica a atualizacao do manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add k8s/app-deployment.yaml
+
+          if git diff --staged --quiet; then
+            echo "Manifest ja aponta para ${{ github.sha }}, nada a commitar."
+            exit 0
+          fi
+
+          git commit -m "chore: atualiza imagem da aplicacao para ${{ github.sha }} [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}

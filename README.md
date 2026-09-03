@@ -23,5 +23,89 @@ Se não entender algum conceito ou parte do problema, não é motivo para se pre
       - Documente no README, problemas encontrados, como você identificou e como resolveu, a arquitetura da solução com decisões técnicas e melhorias realizadas e por fim o que você faria com mais tempo.
 
 Faça um fork e realize commits ao longo do processo para que possamos entender o seu modo de pensar! :)
- 
-  
+
+---
+
+## Documentação da Solução
+
+### 1. Problemas encontrados e como foram resolvidos
+
+O diagnóstico foi feito subindo o `docker-compose.yaml` original e observando os containers falharem (`docker compose up`, `docker logs`), o que expôs os problemas abaixo.
+
+**Docker Compose**
+- `nginx` usava uma imagem externa de terceiros (`javielrezende/nginx`) em vez de buildar a partir do `nginx/Dockerfile` do repositório — removida a referência para usar sempre a imagem construída localmente/no CI.
+- Faltava a declaração da rede `node-network` usada pelos serviços — adicionada ao final do arquivo.
+- Uso da chave `version` (obsoleta na especificação atual do Compose) — removida.
+- Variável `DATABASE` não era passada para o serviço `app`, causando falha de conexão com o banco — adicionada em `environment`.
+
+**Rede entre containers**
+- O `nginx.conf` fazia `proxy_pass http://app;` sem a porta, então o proxy nunca alcançava a aplicação (que escuta em `3000`) — corrigido para `proxy_pass http://app:3000;`.
+
+**Dockerfiles**
+- `node/Dockerfile` usava `node:15` (fora de suporte) e copiava todo o código antes de instalar dependências, invalidando o cache do Docker a cada alteração de código — trocado para `node:22-bookworm-slim` e reordenado para `COPY package*.json` + `npm install` antes do `COPY . .`. Também foi limpo o cache do `apt` (`rm -rf /var/lib/apt/lists/*`) e ampliado o `.dockerignore` (`node_modules`, `.env`, `.git`, `npm-debug.log`) para reduzir o contexto de build e não vazar segredos locais para a imagem.
+- `nginx/Dockerfile` usava a tag flutuante `nginx` (depois `nginx:alpine`) — fixada em `nginx:1.31.4-alpine` para builds reprodutíveis.
+- `mysql/Dockerfile` copiava o diretório inteiro (`COPY . .`) para dentro de `docker-entrypoint-initdb.d`, o que rodaria qualquer arquivo do diretório como script de inicialização — corrigido para copiar apenas o `init.sql` necessário.
+- `node/Dockerfile` rodava a aplicação como `root` e a imagem final carregava a mesma toolchain usada pra instalar as dependências (incluindo `jest`/`supertest`, depois que os testes automatizados foram adicionados) — convertido para multi-stage: um stage `builder` roda `npm install --omit=dev` e baixa o `dockerize`, e o stage `runtime` só copia o `dockerize` e o app já buildado, rodando como um usuário dedicado (`nodejs`, uid `1001`) via `USER nodejs`.
+
+**Health check do Nginx**
+- O pod do `nginx` acumulava vários restarts. Causa: as probes de `readiness`/`liveness` apontavam para `/`, que faz `proxy_pass` pro `app` — qualquer erro do `app` (por exemplo, durante os testes de migração do segredo do MySQL) virava `500`/`502` na própria checagem de saúde do Nginx, e o kubelet matava e reiniciava o container mesmo ele estando saudável. Corrigido criando um endpoint `/nginx-health` isolado no `nginx.conf` (não passa pelo `proxy_pass`) e apontando as probes pra ele em `k8s/nginx-deployment.yaml`, desacoplando a saúde do Nginx da saúde do backend.
+
+**Volume anônimo do `node_modules` desatualizado (Docker Compose)**
+- Ao adicionar a dependência `prom-client`, o container `app` passou a falhar com `Error: Cannot find module 'prom-client'` mesmo com a imagem já rebuildada. Causa: `docker-compose.yaml` usa um volume anônimo (`/usr/src/app/node_modules`) para o `node_modules` não ser sobrescrito pelo bind mount do código local (`./node:/usr/src/app`) — mas esse volume persiste entre `docker compose up`s e não é atualizado automaticamente quando uma nova dependência é instalada na imagem. Resolvido com `docker compose down -v` (remove os volumes) antes de subir de novo. Vale lembrar disso sempre que uma dependência nova for adicionada ao `package.json`.
+
+**Aplicação (Node)**
+- As queries ao MySQL (`connection.query`) não tratavam erros nem callback de falha: uma query com erro travava a aplicação sem resposta ao cliente — adicionado tratamento de erro com log (`console.error`) e retorno de status `500` em caso de falha, tanto no `INSERT` quanto no `SELECT`.
+- A query de `INSERT` montava o SQL por interpolação de string (`` `INSERT INTO peoples(name) VALUES('${faker.name.findName()}')` ``) — trocado por *prepared statement* (`connection.query('INSERT INTO peoples(name) VALUES (?)', [name], ...)`), eliminando o risco de SQL injection por padrão.
+
+**Segredo do MySQL e usuário da aplicação**
+- A senha do MySQL (`root`) estava hardcoded em texto plano no `k8s/mysql-secret.yaml` (versionado no Git) e no `docker-compose.yaml`, e a aplicação conectava ao banco como `root`. Resolvido migrando o segredo para o HashiCorp Vault + External Secrets Operator (detalhes na seção de arquitetura abaixo) e criando um usuário de aplicação (`app_user`) com apenas `SELECT/INSERT/UPDATE/DELETE` em `node_db`.
+- Ao criar esse usuário no MySQL 8 (usado no StatefulSet do Kubernetes), a aplicação passou a falhar com `ER_NOT_SUPPORTED_AUTH_MODE: Client does not support authentication protocol requested by server`. Causa: o driver `mysql` (pacote npm legado usado pela aplicação) não suporta o plugin de autenticação padrão do MySQL 8 (`caching_sha2_password`). Resolvido criando o `app_user` explicitamente com `IDENTIFIED WITH mysql_native_password`.
+- Como o `mysql-0` já tinha um volume de dados inicializado, alterar o `Secret`/o `ExternalSecret` sozinho não muda a senha real já configurada no MySQL (as env vars `MYSQL_ROOT_PASSWORD`/`MYSQL_USER` da imagem oficial só são aplicadas na primeira inicialização de um datadir vazio). Foi necessário rotacionar a senha do `root` e criar o `app_user` manualmente via `ALTER USER`/`CREATE USER` (comandos documentados em `infra/README.md`).
+
+### 2. Arquitetura da solução e decisões técnicas
+
+**Local (Docker Compose)**
+- Três serviços na mesma rede (`node-network`): `nginx` (porta `8080:80`, proxy reverso) → `app` (Node/Express, porta `3000`) → `db` (MySQL). O `app` usa `dockerize -wait tcp://db:3306` para só subir depois que o banco estiver aceitando conexões, evitando falhas de boot por corrida entre containers.
+- A imagem do `app` em `docker-compose.yaml` referencia `felipetech1/desafio-devops-app:${APP_IMAGE_TAG:-latest}`, permitindo que o CI suba a mesma stack já usando a imagem recém-buildada (`APP_IMAGE_TAG=${{ github.sha }}`) como teste de integração antes de publicar.
+
+**Kubernetes (`k8s/`)**
+- Todos os recursos vivem no namespace `desafio-devops` (`namespace.yaml`), isolando o workload do restante do cluster.
+- `app` é um `Deployment` (stateless) com `readinessProbe`/`livenessProbe` apontando para `/health` (endpoint dedicado, sem depender de round-trip com o banco) e `resources.requests/limits` definidos, para o scheduler alocar corretamente e evitar containers que consomem recursos sem limite.
+- `mysql` é um `StatefulSet` (não `Deployment`), com `volumeClaimTemplates` para armazenamento persistente e identidade estável — decisão adequada por ser um banco de dados stateful. As credenciais ficam num `Secret` (`mysql-secret`, hoje gerenciado pelo Vault/ESO — ver abaixo) e o schema inicial num `ConfigMap` (`mysql-init-configmap.yaml`), montado em `/docker-entrypoint-initdb.d`.
+- `nginx` é exposto tanto via `Service` `NodePort` (acesso direto/local, porta `30080`) quanto via `Ingress` (`ingressClassName: nginx`), cobrindo tanto um ambiente sem controlador de ingress quanto um cluster com um já instalado.
+- Autoscaling horizontal (`app-hpa.yaml`): `HorizontalPodAutoscaler` de 1 a 5 réplicas por CPU (`averageUtilization: 70%`), com `stabilizationWindowSeconds: 60` no scale down — evita que o HPA remova réplicas de forma agressiva em picos de tráfego intermitentes.
+- Deploy via GitOps (`argocd-application.yaml`): uma `Application` do ArgoCD aponta para o diretório `k8s/` deste repositório com `syncPolicy.automated` (`prune` + `selfHeal`), então qualquer manifest commitado no branch é aplicado automaticamente no cluster, sem `kubectl apply` manual.
+
+**Gerenciamento de segredos (Vault + External Secrets Operator)**
+- O `Secret` `mysql-secret` deixou de ser um manifest estático versionado no Git e passou a ser gerenciado pelo **External Secrets Operator (ESO)**, que lê as credenciais de um **HashiCorp Vault** e materializa o `Secret` nativo no cluster. `k8s/app-deployment.yaml` e `k8s/mysql-statefulset.yaml` continuam consumindo a senha via `secretKeyRef` exatamente como antes — nenhuma mudança de código na aplicação foi necessária.
+- Fluxo: `k8s/vault-secretstore.yaml` (`SecretStore` apontando pro Vault, autenticando via Kubernetes auth com uma role e uma `ServiceAccount` dedicada — `k8s/mysql-serviceaccount.yaml` — com acesso de leitura restrito só a esse path) → `k8s/mysql-externalsecret.yaml` (`ExternalSecret` que popula `mysql-secret` a partir de `secret/desafio-devops/mysql` no Vault).
+- **Ressalva importante**: o Vault instalado é em **modo dev** (armazenamento em memória, token root efêmero) — adequado para demonstrar a arquitetura neste cluster de laboratório, mas não apto para produção real (produção exigiria Vault HA/raft com storage persistente e auto-unseal via KMS). Vault e ESO são infraestrutura de cluster instalada manualmente (via Helm), fora do path sincronizado pelo ArgoCD — comandos documentados em `infra/README.md`.
+
+**CI/CD (`.github/workflows/ci.yaml`)**
+- Pipeline dispara em push para qualquer branch e em pull requests.
+- Etapas: build da imagem da aplicação → sobe a stack completa via `docker compose up -d` usando a imagem recém-buildada (com credenciais efêmeras geradas no próprio job, via `openssl rand`) → teste de fumaça (`curl --fail` no endpoint exposto pelo Nginx) → publica a imagem no Docker Hub, versionada pelo SHA do commit (`felipetech1/desafio-devops-app:${{ github.sha }}`).
+- Versionar por SHA (em vez de `latest`) evita que um deploy em Kubernetes fique preso a uma tag mutável e permite rollback determinístico apontando o `Deployment` para um SHA anterior.
+- **Fecha o loop de GitOps**: após publicar a imagem, um step atualiza automaticamente a tag em `k8s/app-deployment.yaml` (via `sed`) e commita/dá push de volta no branch como `github-actions[bot]` (mensagem com `[skip ci]`, para não disparar o pipeline em loop). O ArgoCD detecta esse commit e sincroniza o cluster sozinho — nenhum passo manual entre "CI publicou a imagem" e "pod novo rodando".
+
+**Observabilidade**
+- Middleware em `node/index.js` loga `method`, rota, status code e duração de cada requisição — visibilidade básica sobre tráfego e latência da aplicação, disponível via `stdout`/`kubectl logs`.
+- `GET /metrics` (`node/metrics.js`, via `prom-client`) expõe métricas no formato Prometheus: as padrão do processo Node (CPU, heap, event loop) e três customizadas — `http_requests_total` e `http_request_duration_seconds` (por `method`/`route`/`status_code`) e `db_query_duration_seconds` (por `operation` — `insert`/`select` — e `status` — `success`/`error`). `k8s/app-deployment.yaml` já leva as annotations `prometheus.io/scrape`, `port` e `path`, para descoberta automática por um Prometheus que use esse padrão — instalar o Prometheus em si fica fora do escopo deste repositório (ver "o que faria com mais tempo").
+
+**Testes automatizados**
+- `node/index.js` foi separado em duas partes: `index.js` monta e **exporta** o `app` do Express (sem chamar `.listen()`), e `node/server.js` é quem sobe o servidor de fato — separação necessária para o Supertest conseguir testar o `app` via `require()` sem abrir uma porta real.
+- `node/__tests__/app.test.js` (Jest + Supertest) cobre `/health`, a rota `/` (inserção + listagem), o *prepared statement* do `INSERT` e os dois caminhos de erro (falha no `INSERT` e no `SELECT`), usando um mock de `connectionDb.js` — não depende de um MySQL real.
+- O `.github/workflows/ci.yaml` instala as dependências e roda `npm test` **antes** de buildar a imagem Docker, pra falhar rápido (sem gastar tempo de build) se algum teste quebrar.
+
+**Hardening do Dockerfile da aplicação**
+- `node/Dockerfile` virou multi-stage: o stage `builder` instala só dependências de produção (`npm install --omit=dev`) e baixa o `dockerize`; o stage `runtime` copia apenas o resultado disso, sem toolchain de build nem `devDependencies` (`jest`/`supertest` ficam de fora da imagem final).
+- A aplicação passou a rodar como usuário dedicado não-root (`nodejs`, uid/gid `1001`) em vez de `root`, seguindo o mesmo princípio de privilégio mínimo já aplicado ao usuário do MySQL.
+
+### 3. O que faria com mais tempo
+
+- **Produção real para o Vault**: hoje ele roda em modo dev (memória, token root efêmero) só para demonstrar a arquitetura. Levaria para HA/raft com storage persistente e auto-unseal via KMS, além de rotação periódica automática das credenciais (hoje a rotação é manual, documentada em `infra/README.md`).
+- **Instalar Vault/ESO via GitOps também**: hoje é um bootstrap manual via Helm (fora do path sincronizado pelo ArgoCD). Criaria uma segunda `Application` do ArgoCD (com sync-wave anterior à da aplicação) apontando para os charts, para que a infraestrutura de segredos também seja declarativa.
+- **Testes além da aplicação**: os testes hoje cobrem só as rotas do Node (com o banco mockado). Adicionaria testes de integração contra um MySQL real (ex.: via `testcontainers`) e testes automatizados dos manifests Kubernetes (ex.: `kubeconform`/`kube-linter`) no CI.
+- **Observabilidade — fechar o ciclo**: `/metrics` já expõe os dados; faltaria instalar um Prometheus (+ Grafana) de fato no cluster para raspar e visualizar, e adicionar tracing distribuído.
+- **Nginx**: adicionar `readinessProbe`/`resources` já cobre o básico; faria também hardening do `nginx.conf` (headers de segurança, rate limiting), multi-stage/usuário não-root no `nginx/Dockerfile` (feito só no `node/Dockerfile` por ora) e um HPA para o `nginx-deployment`, hoje fixo em 1 réplica.
+- **Ambientes**: parametrizar os manifests (Kustomize/Helm) para suportar múltiplos ambientes (dev/staging/prod) em vez de um único conjunto estático em `k8s/`.
+- **Driver do MySQL**: o pacote `mysql` (legado) não tem retry/reconexão automática após um erro fatal na conexão (uma falha de rede ou restart do banco derruba a aplicação até o próximo redeploy). Migraria para `mysql2` com um pool de conexões, que lida melhor com esse cenário.
