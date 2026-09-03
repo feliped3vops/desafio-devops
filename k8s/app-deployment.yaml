@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: felipetech1/desafio-devops-app:3dc9b4717851ff262a778b633775f273afdfeffa
+          image: felipetech1/desafio-devops-app:86306dac716a3a8c932624728e5feec8c26c582b
           command:
             - node
             - server.js
